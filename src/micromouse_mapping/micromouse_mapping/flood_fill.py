@@ -1,13 +1,6 @@
 from collections import deque
 
-# Konstante iz tvog maze_map.py
-N, E, S, W = 0, 1, 2, 3
-WALL = 1
-FREE = 2
-UNKNOWN = 0
-
-# Pomaci za svaki smjer (dx, dy)
-DELTA = {N: (0, 1), E: (1, 0), S: (0, -1), W: (-1, 0)}
+from micromouse_mapping.maze_map import N, E, S, W, WALL, FREE, DELTA
 
 
 class FloodFill:
@@ -18,6 +11,10 @@ class FloodFill:
 
         # Cilj u centru labirinta (4 ćelije za 16x16 standard)
         self.goal_cells = [(7, 7), (7, 8), (8, 7), (8, 8)]
+
+    def set_goal(self, goal_cells):
+        """Postavlja novi cilj flood filla (npr. start celija za povratak)."""
+        self.goal_cells = goal_cells
 
     def update_distances(self, maze_walls):
         """

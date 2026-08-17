@@ -1,4 +1,4 @@
-import math  # noqa: I001
+import math
 
 import rclpy
 from rclpy.node import Node
@@ -14,14 +14,12 @@ from micromouse_mapping.maze_map import (
     WALL,
     FREE,
     UNKNOWN,
+    LEFT_OF,
+    RIGHT_OF,
+    OPPOSITE,
     yaw_to_heading_strict,
-    DELTA,
 )
 from micromouse_mapping.flood_fill import FloodFill
-
-LEFT_OF = {N: W, W: S, S: E, E: N}
-RIGHT_OF = {N: E, E: S, S: W, W: N}
-OPPOSITE = {N: S, E: W, S: N, W: E}
 
 
 class PlannerNode(Node):
@@ -30,7 +28,6 @@ class PlannerNode(Node):
         self.size = 16
         self.sub = 3
         self.cell = 0.18
-        self.pos_tolerance = 0.036
 
         self.walls = None
         self.robot_x = 0.0
@@ -39,14 +36,11 @@ class PlannerNode(Node):
         self.robot_state = "UNKNOWN"
         self.reached_goal = False
         self.suspect = False
-
-        # Taktičke i navigacijske zastavice
-        self.just_turned = False
-        self.just_wiggled = False
-        self.straight_count = 0
-        self.prev_cx = 0
-        self.prev_cy = 0
-        self.virtual_walls = []
+        self.start_cell = (0, 0)
+        self.phase = "TO_CENTER"  # TO_CENTER -> TO_START
+        self.just_turned = False  # Pamti je li zadnja akcija bila okretanje
+        self.just_wiggled = False  # Pamti je li zadnja akcija bila WIGGLE
+        self.straight_count = 0  # Broj uzastopnih FORWARD-a (za periodicno poravnanje)
 
         self.flood_fill = FloodFill(self.size)
 
@@ -102,19 +96,15 @@ class PlannerNode(Node):
                         walls[x][y][d] = WALL
                     elif v == 0:
                         walls[x][y][d] = FREE
-
-        # Primjena virtualnih zidova za zaključavanje centra
-        for vx, vy, vd in self.virtual_walls:
-            walls[vx][vy][vd] = WALL
-            dx, dy = DELTA[vd]
-            nx, ny = vx + dx, vy + dy
-            if 0 <= nx < size and 0 <= ny < size:
-                walls[nx][ny][OPPOSITE[vd]] = WALL
-
         return walls
 
     def decide(self):
         if self.walls is None or self.robot_state != "IDLE":
+            return
+
+        if self.suspect:
+            # pozicija je vjerojatno kriva (senzor se ne slaze s mapom) -
+            # ne planiraj dalje dok mapping_node ne potvrdi cisto ocitanje
             return
 
         cx = round(self.robot_x / self.cell)
@@ -126,47 +116,21 @@ class PlannerNode(Node):
         if heading is None:
             return
 
-        # Provjera centra i zaključavanje
-        if not self.reached_goal and (cx, cy) in self.flood_fill.goal_cells:
-            self.reached_goal = True
-
-            dx = cx - self.prev_cx
-            dy = cy - self.prev_cy
-            enter_dir = None
-            if dx == 1:
-                enter_dir = W
-            elif dx == -1:
-                enter_dir = E
-            elif dy == 1:
-                enter_dir = S
-            elif dy == -1:
-                enter_dir = N
-
-            PERIMETER = [
-                (7, 7, S),
-                (7, 7, W),
-                (8, 7, S),
-                (8, 7, E),
-                (7, 8, N),
-                (7, 8, W),
-                (8, 8, N),
-                (8, 8, E),
-            ]
-            self.virtual_walls = [
-                edge for edge in PERIMETER if edge != (cx, cy, enter_dir)
-            ]
-            self.flood_fill.goal_cells = [(0, 0)]
-            self.get_logger().info(
-                "CILJ DOSEGNUT! Zaključavam centar i vraćam se na start."
-            )
-
-        elif self.reached_goal and (cx, cy) == (0, 0):
-            self.get_logger().info("POVRATAK ZAVRSEN! Spreman za Fast Run.")
+        if (cx, cy) in self.flood_fill.goal_cells:
+            if self.phase == "TO_CENTER":
+                self.phase = "TO_START"
+                self.flood_fill.set_goal([self.start_cell])
+                self.flood_fill.update_distances(self.walls)
+                self.get_logger().info(
+                    f"CILJ DOSEGNUT u celiji ({cx}, {cy})! "
+                    f"Novi flood fill: povratak na start {self.start_cell}."
+                )
+            elif not self.reached_goal:
+                self.reached_goal = True
+                self.get_logger().info(
+                    f"POVRATAK NA START ZAVRSEN u celiji ({cx}, {cy})! Zaustavljam."
+                )
             return
-
-        # Ažuriramo prethodnu poziciju
-        self.prev_cx = cx
-        self.prev_cy = cy
 
         self.flood_fill.update_distances(self.walls)
         best = self.flood_fill.get_best_move(cx, cy, self.walls)
@@ -212,12 +176,7 @@ class PlannerNode(Node):
         elif best == LEFT_OF[heading]:
             msg.data = "TURN_LEFT"
             self.just_turned = True
-            self.straight_count = 0
-        elif best == RIGHT_OF[heading]:
-            msg.data = "TURN_RIGHT"
-            self.just_turned = True
-            self.straight_count = 0
-        elif best == OPPOSITE[heading]:
+        elif best == RIGHT_OF[heading] or best == OPPOSITE[heading]:
             msg.data = "TURN_RIGHT"
             self.just_turned = True
             self.straight_count = 0
