@@ -38,9 +38,6 @@ class PlannerNode(Node):
         self.suspect = False
         self.start_cell = (0, 0)
         self.phase = "TO_CENTER"  # TO_CENTER -> TO_START
-        self.just_turned = False  # Pamti je li zadnja akcija bila okretanje
-        self.just_wiggled = False  # Pamti je li zadnja akcija bila WIGGLE
-        self.straight_count = 0  # Broj uzastopnih FORWARD-a (za periodicno poravnanje)
 
         self.flood_fill = FloodFill(self.size)
 
@@ -99,14 +96,14 @@ class PlannerNode(Node):
         return walls
 
     def decide(self):
+        # planiraj samo kad: imamo mapu, robot je slobodan (handshake),
+        # i lokalizacija nije sumnjiva
         if self.walls is None or self.robot_state != "IDLE":
             return
-
         if self.suspect:
-            # pozicija je vjerojatno kriva (senzor se ne slaze s mapom) -
-            # ne planiraj dalje dok mapping_node ne potvrdi cisto ocitanje
             return
 
+        # poza dolazi iz lokalizacije: vec korigirana i yaw-snapana.
         cx = round(self.robot_x / self.cell)
         cy = round(self.robot_y / self.cell)
         if not (0 <= cx < self.size and 0 <= cy < self.size):
@@ -114,76 +111,39 @@ class PlannerNode(Node):
 
         heading = yaw_to_heading_strict(self.robot_yaw, tolerance_deg=10)
         if heading is None:
-            return
+            return  # sigurnosna; s lokalizacijom bi kut vec trebao biti cist
 
+        # --- cilj dosegnut? ---
         if (cx, cy) in self.flood_fill.goal_cells:
             if self.phase == "TO_CENTER":
                 self.phase = "TO_START"
                 self.flood_fill.set_goal([self.start_cell])
                 self.flood_fill.update_distances(self.walls)
                 self.get_logger().info(
-                    f"CILJ DOSEGNUT u celiji ({cx}, {cy})! "
-                    f"Novi flood fill: povratak na start {self.start_cell}."
+                    f"CILJ DOSEGNUT ({cx},{cy})! Povratak na {self.start_cell}."
                 )
             elif not self.reached_goal:
                 self.reached_goal = True
-                self.get_logger().info(
-                    f"POVRATAK NA START ZAVRSEN u celiji ({cx}, {cy})! Zaustavljam."
-                )
+                self.get_logger().info(f"POVRATAK ZAVRSEN ({cx},{cy}). Stop.")
             return
 
+        # --- flood fill: koji je najbolji sljedeci smjer ---
         self.flood_fill.update_distances(self.walls)
         best = self.flood_fill.get_best_move(cx, cy, self.walls)
         if best is None:
             return
 
-        # --- TAKTIČKI WIGGLE ---
-        front_wall = self.walls[cx][cy][heading] == WALL
-        left_wall = self.walls[cx][cy][LEFT_OF[heading]] == WALL
-        right_wall = self.walls[cx][cy][RIGHT_OF[heading]] == WALL
-
-        if not self.just_wiggled:
-            do_wiggle = False
-
-            if (
-                self.just_turned
-                or best != heading
-                and front_wall
-                or (
-                    best == heading
-                    and self.straight_count >= 3
-                    and (left_wall or right_wall)
-                )
-            ):
-                do_wiggle = True
-
-            if do_wiggle:
-                self.just_wiggled = True
-                self.just_turned = False
-                msg = String()
-                msg.data = "WIGGLE"
-                self.get_logger().info("Odluka: WIGGLE (taktičko poravnanje)")
-                self.command_pub.publish(msg)
-                return
-
-        self.just_wiggled = False
+        # --- prevedi apsolutni smjer u komandu relativnu na trenutni heading ---
         msg = String()
-
         if best == heading:
             msg.data = "FORWARD"
-            self.just_turned = False
-            self.straight_count += 1
         elif best == LEFT_OF[heading]:
             msg.data = "TURN_LEFT"
-            self.just_turned = True
-        elif best == RIGHT_OF[heading] or best == OPPOSITE[heading]:
+        else:  # RIGHT_OF ili OPPOSITE -> okreni desno (iduci ciklus nastavi)
             msg.data = "TURN_RIGHT"
-            self.just_turned = True
-            self.straight_count = 0
 
-        if msg.data:
-            self.get_logger().info(f"Odluka: {msg.data}")
-            self.command_pub.publish(msg)
+        self.get_logger().info(f"Odluka: {msg.data}")
+        self.command_pub.publish(msg)
 
 
 def main(args=None):

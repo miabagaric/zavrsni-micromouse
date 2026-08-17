@@ -3,16 +3,15 @@ import math  # noqa: I001
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
-from nav_msgs.msg import Odometry, OccupancyGrid
+from nav_msgs.msg import OccupancyGrid  # maknut Odometry (ne treba više)
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Bool
-
 from micromouse_mapping.maze_map import MazeMap
 
 
 class MappingNode(Node):
-    """PERCEPCIJA: cita senzore + odometriju, gradi mapu, objavljuje mapu (podatke)
-    i pozu robota. Ne planira i ne zna nista o prikazu."""
+    """PERCEPCIJA: cita senzore + pozu (iz lokalizacije), gradi mapu,
+    objavljuje mapu. Ne planira, ne racuna pozu, ne zna nista o prikazu."""
 
     def __init__(self):
         super().__init__("mapping_node")
@@ -29,19 +28,15 @@ class MappingNode(Node):
             self.create_subscription(
                 LaserScan, "/" + name, lambda msg, n=name: self.ir_callback(msg, n), 10
             )
-        self.create_subscription(Odometry, "/odom", self.odom_callback, 10)
 
-        # poza robota u okviru 'map' (poravnata na poznatu startnu pozu)
         self.robot_x = 0.0
         self.robot_y = 0.0
-        self.robot_yaw = math.pi / 2  # start: sjever
-        self.yaw_offset = None
-        self.start_ox = 0.0
-        self.start_oy = 0.0
+        self.robot_yaw = math.pi / 2
+        self.create_subscription(PoseStamped, "/robot_pose", self.pose_callback, 10)
 
         self.map = MazeMap(16)
         self.grid_pub = self.create_publisher(OccupancyGrid, "/maze_map", 10)
-        self.pose_pub = self.create_publisher(PoseStamped, "/robot_pose", 10)
+        # [FIX] maknut self.pose_pub — pozu sad objavljuje localization_node
         self.suspect_pub = self.create_publisher(Bool, "/localization_suspect", 10)
         self.suspect = False
         self.create_timer(0.2, self.update_and_publish)
@@ -49,44 +44,34 @@ class MappingNode(Node):
     def ir_callback(self, msg, name):
         self.ir_ranges[name] = msg.ranges[0] if msg.ranges else float("inf")
 
-    def odom_callback(self, msg):
-        ox = msg.pose.pose.position.x
-        oy = msg.pose.pose.position.y
-        q = msg.pose.pose.orientation
-        oyaw = math.atan2(
+    def pose_callback(self, msg):
+        self.robot_x = msg.pose.position.x
+        self.robot_y = msg.pose.position.y
+        q = msg.pose.orientation
+        self.robot_yaw = math.atan2(
             2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         )
 
-        # poravnanje na poznatu startnu pozu: (0,0) gledajuci sjever (+90°)
-        if self.yaw_offset is None:
-            self.yaw_offset = math.pi / 2 - oyaw
-            self.start_ox = ox
-            self.start_oy = oy
-
-        c, s = math.cos(self.yaw_offset), math.sin(self.yaw_offset)
-        dx, dy = ox - self.start_ox, oy - self.start_oy
-        self.robot_x = c * dx - s * dy
-        self.robot_y = s * dx + c * dy
-        self.robot_yaw = oyaw + self.yaw_offset
+    def status_callback(self, msg):  # [FIX] puni self.robot_status
+        self.robot_status = msg.data
 
     def update_and_publish(self):
         result = self.map.update_from_sensors(
             self.robot_x, self.robot_y, self.robot_yaw, self.ir_ranges
         )
-        # result: True=neslaganje, False=cisto ocitanje, None=nije mjereno (nije poravnat)
         if result is True:
             self.suspect = True
             cx, cy, d, known, sensed = self.map.last_conflict
             self.get_logger().warn(
-                f"NESLAGANJE u ({cx},{cy}) smjer {d}: mapa kaze {known}, senzor {sensed} "
-                f"-> vjerojatno kriva pozicija (mapa NIJE prepisana)"
+                f"NESLAGANJE u ({cx},{cy}) smjer {d}: mapa kaze {known}, "
+                f"senzor {sensed} -> vjerojatno kriva pozicija (mapa NIJE prepisana)"
             )
         elif result is False:
             self.suspect = False
 
+        # mapu i suspect objavljujemo UVIJEK (izvan IDLE gejta)
         self.suspect_pub.publish(Bool(data=self.suspect))
         self.grid_pub.publish(self.build_grid())
-        self.pose_pub.publish(self.build_pose())
 
     def build_grid(self):
         sub, cell = 3, 0.18
@@ -108,16 +93,6 @@ class MappingNode(Node):
             flat.extend(row)
         msg.data = flat
         return msg
-
-    def build_pose(self):
-        p = PoseStamped()
-        p.header.frame_id = "map"
-        p.header.stamp = self.get_clock().now().to_msg()
-        p.pose.position.x = self.robot_x
-        p.pose.position.y = self.robot_y
-        p.pose.orientation.z = math.sin(self.robot_yaw / 2.0)
-        p.pose.orientation.w = math.cos(self.robot_yaw / 2.0)
-        return p
 
 
 def main(args=None):

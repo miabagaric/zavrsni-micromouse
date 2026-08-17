@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import math
 import rclpy
 from rclpy.node import Node
@@ -18,46 +17,76 @@ class MotionController(Node):
         self.create_subscription(Odometry, "/odom", self.odom_cb, 10)
         self.create_subscription(String, "/maze_commands", self.command_cb, 10)
 
-        # senzori (samo front nam treba za Blok A, ostale učitavamo za kasnije)
         self.ir_front = float("inf")
+        self.ir_left = float("inf")
+        self.ir_right = float("inf")
         self.create_subscription(
             LaserScan, "/ir_front", lambda m: self._ir("ir_front", m), 10
         )
+        self.create_subscription(
+            LaserScan, "/ir_left", lambda m: self._ir("ir_left", m), 10
+        )
+        self.create_subscription(
+            LaserScan, "/ir_right", lambda m: self._ir("ir_right", m), 10
+        )
 
-        # --- stanje odometrije (SIROVA, relativna — NE treba nam svjetski okvir) ---
         self.odom_x = 0.0
         self.odom_y = 0.0
+        self.odom_yaw = 0.0
         self.have_odom = False
 
         # --- parametri Bloka A ---
-        self.CELL = 0.180  # duljina ćelije [m]
-        self.FRONT_TARGET = 0.0078  # izmjereno: ir_front kad je base_footprint u centru
-        self.FRONT_WALL_THR = 0.12  # ispod ovoga smatramo da zid POSTOJI ispred
-        self.V_MAX = 0.15  # gornji limit brzine [m/s]
-        self.V_BRAKE = -0.06  # dopušteni pogon unatrag (aktivno kočenje kod preleta)
-        self.STOP_ODOM = 0.003  # tolerancija zaustavljanja kad NEMA zida [m]
-        self.STOP_WALL = 0.0005  # tolerancija kad se sidrimo na zid [m]
-
+        self.CELL = 0.180
+        self.FRONT_TARGET = 0.0078
+        self.FRONT_WALL_THR = 0.12
+        self.V_MAX = 0.15
+        self.V_BRAKE = -0.06
+        self.STOP_ODOM = 0.003
+        self.STOP_WALL = 0.0005
         self.kp_lin = 3.0
         self.kd_lin = 0.35
 
+        # --- parametri Bloka B (centriranje) ---
+        self.TARGET_SIDE = 0.042
+        self.SIDE_WALL_THR = 0.12
+        self.kp_center = 4.0
+        self.kp_yaw = 1.5
+        self.CENTER_DEADBAND = 0.001
+        self.W_LIMIT = 1.0
+
+        # --- parametri Bloka C (okret) ---
+        self.TURN_TARGET = math.pi / 2  # [C] 90° po komandi
+        self.kp_turn = 2.0  # [C] pojačanje na kutnu grešku
+        self.kd_turn = 0.3  # [C] prigušenje (protiv prebačaja)
+        self.TURN_STOP = 0.008  # [C] tolerancija zaustavljanja (rad, ~0.5°)
+        self.TURN_W_MAX = 1.2  # [C] limit brzine okreta
+        self.TURN_W_BRAKE = 0.3  # [C] dopušteni protupogon (aktivno kočenje)
+
         # --- FSM ---
         self.state = "IDLE"
-        self.anchor_x = 0.0  # odom pozicija na početku poteza
+        self.anchor_x = 0.0
         self.anchor_y = 0.0
+        self.anchor_yaw = 0.0
         self.prev_err = 0.0
         self.prev_front_wall = False
+        self.turn_target_yaw = 0.0  # [C] apsolutni cilj = anchor_yaw ± 90°
+        self.prev_turn_err = 0.0  # [C] za D-član okreta
 
-        self.create_timer(0.02, self.control_loop)  # 50 Hz kontrola
-        self.create_timer(0.10, self.publish_status)  # 10 Hz status
+        self.create_timer(0.02, self.control_loop)
+        self.create_timer(0.10, self.publish_status)
 
     def _ir(self, name, msg):
         setattr(self, name, msg.ranges[0] if msg.ranges else float("inf"))
 
+    @staticmethod
+    def ang_diff(a, b):
+        return math.atan2(math.sin(a - b), math.cos(a - b))
+
     def odom_cb(self, msg):
-        # čitamo SAMO poziciju, i to relativno. Yaw nas u Bloku A ne zanima.
         self.odom_x = msg.pose.pose.position.x
         self.odom_y = msg.pose.pose.position.y
+        q = msg.pose.pose.orientation
+        _, _, self.odom_yaw = transforms3d.euler.quat2euler([q.w, q.x, q.y, q.z])
         self.have_odom = True
 
     def publish_status(self):
@@ -67,17 +96,49 @@ class MotionController(Node):
 
     def command_cb(self, msg):
         if self.state != "IDLE":
-            return  # handshake: primamo naredbu samo kad smo slobodni
-        if msg.data == "FORWARD":
+            return
+        cmd = msg.data
+
+        if cmd == "FORWARD":
             if not self.have_odom:
                 return
-            # sidro = TRENUTNA odom pozicija. Sve mjerimo relativno od nje,
-            # pa drift između poteza ne ulazi u ovaj potez.
             self.anchor_x = self.odom_x
             self.anchor_y = self.odom_y
+            self.anchor_yaw = self.odom_yaw
             self.prev_err = 0.0
             self.prev_front_wall = self.ir_front < self.FRONT_WALL_THR
             self.state = "FORWARD"
+
+        elif cmd == "TURN_LEFT":  # [C]
+            if not self.have_odom:
+                return
+            # cilj = trenutni smjer + 90°. ang_diff u loopu rješava wraparound.
+            self.turn_target_yaw = self.odom_yaw + self.TURN_TARGET
+            self.prev_turn_err = 0.0
+            self.state = "TURN"
+
+        elif cmd == "TURN_RIGHT":  # [C]
+            if not self.have_odom:
+                return
+            self.turn_target_yaw = self.odom_yaw - self.TURN_TARGET
+            self.prev_turn_err = 0.0
+            self.state = "TURN"
+
+    def centering_correction(self):
+        L, R = self.ir_left, self.ir_right
+        thr = self.SIDE_WALL_THR
+        if L < thr and R < thr:
+            err = L - R
+        elif L < thr:
+            err = L - self.TARGET_SIDE
+        elif R < thr:
+            err = self.TARGET_SIDE - R
+        else:
+            err_yaw = self.ang_diff(self.anchor_yaw, self.odom_yaw)
+            return self.kp_yaw * err_yaw
+        if abs(err) < self.CENTER_DEADBAND:
+            return 0.0
+        return self.kp_center * err
 
     def control_loop(self):
         cmd = Twist()
@@ -87,43 +148,56 @@ class MotionController(Node):
             return
 
         if self.state == "FORWARD":
-            # koliko smo stvarno prešli od sidra (euklidski pomak u ravnini)
             travelled = math.hypot(
                 self.odom_x - self.anchor_x, self.odom_y - self.anchor_y
             )
-
             front_wall = self.ir_front < self.FRONT_WALL_THR
 
-            # DVA NAČINA MJERENJA GREŠKE, isti cilj (base_footprint u centru):
             if front_wall:
-                # zid ispred = precizno ravnalo. Greška = koliko još do mete.
-                # ir_front > FRONT_TARGET znači "još sam predaleko, vozi naprijed".
                 err = self.ir_front - self.FRONT_TARGET
                 stop_tol = self.STOP_WALL
             else:
-                # nema zida = oslanjamo se na odometriju (18 cm od sidra).
                 err = self.CELL - travelled
                 stop_tol = self.STOP_ODOM
 
-            # prijelaz odometrija<->zid: resetiraj D-član da ne skoči derivacija
             if front_wall != self.prev_front_wall:
                 self.prev_err = err
             self.prev_front_wall = front_wall
 
-            # uvjet zaustavljanja (uvijek postoji izlaz iz stanja -> robusnost)
             if err <= stop_tol:
                 self.state = "IDLE"
                 self.cmd_pub.publish(Twist())
                 return
 
-            # PD regulator brzine
             d_err = err - self.prev_err
             self.prev_err = err
             v = self.kp_lin * err + self.kd_lin * d_err
-
-            # limit + aktivno kočenje unatrag ako smo preletjeli metu
             cmd.linear.x = max(min(v, self.V_MAX), self.V_BRAKE)
-            # angular.z = 0 za sada (centriranje dolazi u Bloku B)
+
+            corr = self.centering_correction()
+            cmd.angular.z = max(min(corr, self.W_LIMIT), -self.W_LIMIT)
+
+        elif self.state == "TURN":  # [C]
+            # stvarna greška do cilja; ang_diff drži je u (-pi, pi] pa je
+            # smjer okreta uvijek najkraći i wraparound preko ±pi je riješen.
+            err = self.ang_diff(self.turn_target_yaw, self.odom_yaw)
+
+            # zaustavljanje na STVARNOJ grešci — bez lažiranja yaw-a.
+            # kad stane, odom i dalje govori istinu, greška se NE gomila.
+            if abs(err) < self.TURN_STOP:
+                self.state = "IDLE"
+                self.cmd_pub.publish(Twist())
+                return
+
+            d_err = err - self.prev_turn_err
+            self.prev_turn_err = err
+            w = self.kp_turn * err + self.kd_turn * d_err
+            # limit + dopušten protupogon protiv prebačaja (isti trik kao V_BRAKE)
+            if w > 0:
+                cmd.angular.z = min(w, self.TURN_W_MAX)
+            else:
+                cmd.angular.z = max(w, -self.TURN_W_MAX)
+            # linear.x = 0 (čist pivot oko base_footprint)
 
         self.cmd_pub.publish(cmd)
 

@@ -18,7 +18,7 @@ RIGHT_OF = {N: E, E: S, S: W, W: N}
 
 # tolerancija
 tolerance_deg = 10
-center_tolerance = 0.35  # tolerancija pozicije u celiji (postotak)
+center_tolerance = 0.11  # tolerancija pozicije u celiji (postotak)
 
 
 def yaw_to_heading_strict(yaw, tolerance_deg=10):

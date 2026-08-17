@@ -26,6 +26,7 @@ setup(
             "mapping_node = micromouse_mapping.mapping_node:main",
             "maze_viz_node = micromouse_mapping.maze_viz_node:main",
             "planner_node = micromouse_mapping.planner_node:main",
+            "localization_node = micromouse_mapping.localization_node:main",
         ],
     },
 )
