@@ -1,80 +1,128 @@
-import math  # noqa: I001
-
+#!/usr/bin/env python3
+import math
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
-from nav_msgs.msg import OccupancyGrid  # maknut Odometry (ne treba više)
+from nav_msgs.msg import OccupancyGrid
 from geometry_msgs.msg import PoseStamped
-from std_msgs.msg import Bool
+from std_msgs.msg import String
+
 from micromouse_mapping.maze_map import MazeMap
 
 
+# smjerovi i rotacije (iste konvencije kao lokalizacija)
+N, E, S, W = 0, 1, 2, 3
+LEFT_OF = {N: W, W: S, S: E, E: N}
+RIGHT_OF = {N: E, E: S, S: W, W: N}
+
+CELL = 0.18
+WALL_THR = 0.12  # ir < ovo => zid postoji ispred senzora
+
+# stanje zida u MazeMap (pretpostavljene konstante iz maze_map.py)
+# ako se tvoje zovu drukcije, promijeni ovdje
+WALL = 1
+FREE = 2
+
+
+def quat_to_heading(q):
+    """Poza iz lokalizacije nosi tocan kardinalni kut -> vrati N/E/S/W."""
+    yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+    deg = math.degrees(yaw) % 360
+    # zaokruzi na najblizi kardinalni (poza je vec kardinalna, ovo je samo citanje)
+    if 45 <= deg < 135:
+        return N
+    if 135 <= deg < 225:
+        return W
+    if 225 <= deg < 315:
+        return S
+    return E
+
+
 class MappingNode(Node):
-    """PERCEPCIJA: cita senzore + pozu (iz lokalizacije), gradi mapu,
-    objavljuje mapu. Ne planira, ne racuna pozu, ne zna nista o prikazu."""
+    """Cita diskretnu pozu (celija + smjer) i senzore. Kad robot miruje,
+    upisuje zidove za trenutnu celiju. Objavljuje mapu. Ne racuna pozu."""
 
     def __init__(self):
         super().__init__("mapping_node")
 
-        self.ir_names = [
-            "ir_left",
-            "ir_left_diag",
-            "ir_front",
-            "ir_right_diag",
-            "ir_right",
-        ]
-        self.ir_ranges = {name: float("inf") for name in self.ir_names}
-        for name in self.ir_names:
-            self.create_subscription(
-                LaserScan, "/" + name, lambda msg, n=name: self.ir_callback(msg, n), 10
-            )
+        # senzori za mapiranje zidova: prednji, lijevi, desni
+        self.ir_front = float("inf")
+        self.ir_left = float("inf")
+        self.ir_right = float("inf")
+        self.create_subscription(
+            LaserScan, "/ir_front", lambda m: self._ir("ir_front", m), 10
+        )
+        self.create_subscription(
+            LaserScan, "/ir_left", lambda m: self._ir("ir_left", m), 10
+        )
+        self.create_subscription(
+            LaserScan, "/ir_right", lambda m: self._ir("ir_right", m), 10
+        )
 
-        self.robot_x = 0.0
-        self.robot_y = 0.0
-        self.robot_yaw = math.pi / 2
-        self.create_subscription(PoseStamped, "/robot_pose", self.pose_callback, 10)
+        # diskretna poza iz lokalizacije
+        self.cx = 0
+        self.cy = 0
+        self.heading = N
+        self.create_subscription(PoseStamped, "/robot_pose", self.pose_cb, 10)
+
+        # status: mapiramo samo kad robot miruje (IDLE)
+        self.status = "UNKNOWN"
+        self.create_subscription(String, "/robot_status", self.status_cb, 10)
 
         self.map = MazeMap(16)
         self.grid_pub = self.create_publisher(OccupancyGrid, "/maze_map", 10)
-        # [FIX] maknut self.pose_pub — pozu sad objavljuje localization_node
-        self.suspect_pub = self.create_publisher(Bool, "/localization_suspect", 10)
-        self.suspect = False
-        self.create_timer(0.2, self.update_and_publish)
+        self.mapped_pub = self.create_publisher(String, "/mapped_cell", 10)
 
-    def ir_callback(self, msg, name):
-        self.ir_ranges[name] = msg.ranges[0] if msg.ranges else float("inf")
+        # pamti zadnju ozidanu celiju da ne upisujemo isto svaki tick
+        self.last_mapped = None
 
-    def pose_callback(self, msg):
-        self.robot_x = msg.pose.position.x
-        self.robot_y = msg.pose.position.y
-        q = msg.pose.orientation
-        self.robot_yaw = math.atan2(
-            2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
-        )
+        self.create_timer(0.1, self.tick)
 
-    def status_callback(self, msg):  # [FIX] puni self.robot_status
-        self.robot_status = msg.data
+    def _ir(self, name, msg):
+        setattr(self, name, msg.ranges[0] if msg.ranges else float("inf"))
 
-    def update_and_publish(self):
-        result = self.map.update_from_sensors(
-            self.robot_x, self.robot_y, self.robot_yaw, self.ir_ranges
-        )
-        if result is True:
-            self.suspect = True
-            cx, cy, d, known, sensed = self.map.last_conflict
-            self.get_logger().warn(
-                f"NESLAGANJE u ({cx},{cy}) smjer {d}: mapa kaze {known}, "
-                f"senzor {sensed} -> vjerojatno kriva pozicija (mapa NIJE prepisana)"
-            )
-        elif result is False:
-            self.suspect = False
+    def pose_cb(self, msg):
+        # poza je savrsena: centar celije + kardinalni kut
+        self.cx = round(msg.pose.position.x / CELL)
+        self.cy = round(msg.pose.position.y / CELL)
+        self.heading = quat_to_heading(msg.pose.orientation)
 
-        # mapu i suspect objavljujemo UVIJEK (izvan IDLE gejta)
-        self.suspect_pub.publish(Bool(data=self.suspect))
+    def status_cb(self, msg):
+        self.status = msg.data
+
+    def tick(self):
+        # mapiraj samo kad robot miruje i tek jednom po celiji
+        if self.status == "IDLE" and self.last_mapped != (self.cx, self.cy):
+            self.map_current_cell()
+            self.last_mapped = (self.cx, self.cy)
+
+        # mapu objavljujemo uvijek (za RViz/planner)
         self.grid_pub.publish(self.build_grid())
 
+    def map_current_cell(self):
+        # tri senzora -> tri apsolutna smjera zida (relativno na heading)
+        front_dir = self.heading
+        left_dir = LEFT_OF[self.heading]
+        right_dir = RIGHT_OF[self.heading]
+
+        readings = {
+            front_dir: self.ir_front,
+            left_dir: self.ir_left,
+            right_dir: self.ir_right,
+        }
+        for direction, r in readings.items():
+            state = WALL if r < WALL_THR else FREE
+            self.map.set_wall(self.cx, self.cy, direction, state)
+
+        self.get_logger().info(
+            f"mapirao ({self.cx},{self.cy}) "
+            f"F={self.ir_front:.3f} L={self.ir_left:.3f} R={self.ir_right:.3f}"
+        )
+
+        self.mapped_pub.publish(String(data=f"{self.cx},{self.cy}"))
+
     def build_grid(self):
-        sub, cell = 3, 0.18
+        sub, cell = 3, CELL
         n = self.map.size * sub
         grid = self.map.to_grid(sub)
 
@@ -97,9 +145,7 @@ class MappingNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = MappingNode()
-    rclpy.spin(node)
-    node.destroy_node()
+    rclpy.spin(MappingNode())
     rclpy.shutdown()
 
 
