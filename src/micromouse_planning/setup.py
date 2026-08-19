@@ -22,6 +22,9 @@ setup(
         ],
     },
     entry_points={
-        "console_scripts": ["planner_node = micromouse_planning.planner_node:main"],
+        "console_scripts": [
+            "planner_node = micromouse_planning.planner_node:main",
+            "test_astar_truth = micromouse_planning.test.test_astar_truth:main",
+        ],
     },
 )

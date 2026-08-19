@@ -40,9 +40,9 @@ class MotionController(Node):
         self.CELL = 0.180
         self.FRONT_TARGET = 0.0078
         self.FRONT_WALL_THR = 0.12
-        self.V_MAX = 0.15
-        self.V_BRAKE = -0.06
-        self.STOP_ODOM = 0.003
+        self.V_MAX = 0.3
+        self.V_BRAKE = -0.1
+        self.STOP_ODOM = 0.0001
         self.STOP_WALL = 0.0005
         self.FWD_TOL = 0.05
         self.kp_lin = 3.0
@@ -52,6 +52,7 @@ class MotionController(Node):
         self.TARGET_SIDE = 0.042
         self.SIDE_WALL_THR = 0.12
         self.kp_center = 4.0
+        self.kd_center = 2.5
         self.kp_yaw = 1.5
         self.CENTER_DEADBAND = 0.001
         self.W_LIMIT = 1.0
@@ -61,8 +62,10 @@ class MotionController(Node):
         self.kp_turn = 2.0
         self.kd_turn = 0.3
         self.TURN_STOP = 0.008
-        self.TURN_W_MAX = 1.2
+        self.TURN_W_MAX = 2.0
         self.TURN_W_BRAKE = 0.3
+        self.TURN_EXTRA = 0.02
+        self.add_after_turn = False
 
         # FSM
         self.state = "IDLE"
@@ -73,6 +76,7 @@ class MotionController(Node):
         self.prev_front_wall = False
         self.turn_target_yaw = 0.0
         self.prev_turn_err = 0.0
+        self.prev_center_err = 0.0
 
         self.create_timer(0.02, self.control_loop)
         self.create_timer(0.10, self.publish_status)
@@ -133,10 +137,14 @@ class MotionController(Node):
             err = self.TARGET_SIDE - R
         else:
             err_yaw = self.ang_diff(self.anchor_yaw, self.odom_yaw)
+            self.prev_center_err = 0.0
             return self.kp_yaw * err_yaw
         if abs(err) < self.CENTER_DEADBAND:
+            self.prev_center_err = 0.0
             return 0.0
-        return self.kp_center * err
+        d_err = err - self.prev_center_err
+        self.prev_center_err = err
+        return self.kp_center * err + self.kd_center * d_err
 
     def control_loop(self):
         cmd = Twist()
@@ -148,23 +156,18 @@ class MotionController(Node):
                 self.odom_x - self.anchor_x, self.odom_y - self.anchor_y
             )
             front_wall = self.ir_front < self.FRONT_WALL_THR
+            target = self.CELL + (self.TURN_EXTRA if self.add_after_turn else 0.0)
             if front_wall:
                 err = self.ir_front - self.FRONT_TARGET
                 stop_tol = self.STOP_WALL
             else:
-                err = self.CELL - travelled
+                err = target - travelled
                 stop_tol = self.STOP_ODOM
             if front_wall != self.prev_front_wall:
                 self.prev_err = err
             self.prev_front_wall = front_wall
             if err <= stop_tol:
-                dev = travelled - self.CELL
-                if abs(dev) > self.FWD_TOL:
-                    self.get_logger().warn(
-                        f"FORWARD divergencija: presao {travelled * 100:.1f} cm "
-                        f"(ocekivano {self.CELL * 100:.1f}, odstupanje {dev * 1000:+.0f} mm) "
-                        f"-> lokalizacija se mozda razisla"
-                    )
+                self.add_after_turn = False
                 self.state = "IDLE"
                 self.cmd_pub.publish(Twist())
                 return
@@ -177,6 +180,7 @@ class MotionController(Node):
         elif self.state == "TURN":
             err = self.ang_diff(self.turn_target_yaw, self.odom_yaw)
             if abs(err) < self.TURN_STOP:
+                self.add_after_turn = True
                 self.state = "IDLE"
                 self.cmd_pub.publish(Twist())
                 return
