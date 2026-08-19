@@ -45,6 +45,19 @@ def yaw_to_heading_strict(yaw, tolerance_deg=10):
     return None  # Robot nije dobro poravnat
 
 
+def quat_to_heading(q):
+    """Kvaternion (q.w,q.x,q.y,q.z) -> N/E/S/W binningom po 90°."""
+    yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+    deg = math.degrees(yaw) % 360
+    if 45 <= deg < 135:
+        return N
+    if 135 <= deg < 225:
+        return W
+    if 225 <= deg < 315:
+        return S
+    return E
+
+
 class MazeMap:
     def __init__(self, size=16):
         self.size = size

@@ -101,8 +101,15 @@ def generate_launch_description():
         parameters=[{"use_sim_time": use_sim_time}],
     )
     planner = Node(
-        package="micromouse_mapping",
+        package="micromouse_planning",
         executable="planner_node",
+        output="screen",
+        parameters=[{"use_sim_time": use_sim_time}],
+    )
+
+    localization = Node(
+        package="micromouse_localization",
+        executable="localization_node",
         output="screen",
         parameters=[{"use_sim_time": use_sim_time}],
     )
@@ -128,5 +135,6 @@ def generate_launch_description():
             planner,
             static_tf,
             rviz,
+            localization,
         ]
     )

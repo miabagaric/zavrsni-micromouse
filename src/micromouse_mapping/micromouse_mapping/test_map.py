@@ -1,4 +1,4 @@
-from micromouse_mapping.maze_map import MazeMap, WALL, FREE, N, E, S, W, yaw_to_heading
+from micromouse_common.maze_map import MazeMap, WALL, FREE, N, E, S, W, yaw_to_heading
 import math
 
 m = MazeMap(16)

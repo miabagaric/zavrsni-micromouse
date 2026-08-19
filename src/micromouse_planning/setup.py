@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = "micromouse_mapping"
+package_name = "micromouse_planning"
 
 setup(
     name=package_name,
@@ -22,9 +22,6 @@ setup(
         ],
     },
     entry_points={
-        "console_scripts": [
-            "mapping_node = micromouse_mapping.mapping_node:main",
-            "maze_viz_node = micromouse_mapping.maze_viz_node:main",
-        ],
+        "console_scripts": ["planner_node = micromouse_planning.planner_node:main"],
     },
 )

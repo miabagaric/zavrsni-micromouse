@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
-"""
-Wall follower (pravilo lijeve ruke) — BASELINE za usporedbu s flood fillom.
-Reaktivan: odlucuje samo iz zidova oko trenutne celije i smjera gledanja.
-"""
+"""Wall follower (modificirano pravilo lijeve ruke) — BASELINE."""
 
-from micromouse_mapping.maze_map import (
+from micromouse_common.maze_map import (
     N,
     E,
     S,
@@ -22,13 +19,10 @@ class WallFollower:
     def __init__(self, size=16):
         self.size = size
         self.goal_cells = [(7, 7), (7, 8), (8, 7), (8, 8)]
-
-        # detekcija petlje: skup vidjenih stanja (cx, cy, heading)
         self.seen = set()
-        self.last_state = None  # zadnje OBRADENO stanje (da ne brojimo dvaput)
+        self.last_state = None
         self.max_steps = 4 * size * size
         self.steps = 0
-
         self.go_forward = False
         self.finished = False
         self.reached_goal = False
@@ -38,7 +32,8 @@ class WallFollower:
         self.goal_cells = goal_cells
 
     def _passable(self, walls, cx, cy, direction):
-        if walls[cx][cy][direction] == WALL:
+        # prolazno = DOKAZANO slobodno (FREE). UNKNOWN NE racunamo (inace vrtenje).
+        if walls[cx][cy][direction] != FREE:
             return False
         dx, dy = DELTA[direction]
         nx, ny = cx + dx, cy + dy
@@ -47,9 +42,7 @@ class WallFollower:
     def get_best_move(self, cx, cy, heading, walls):
         if self.finished:
             return None
-
         state = (cx, cy, heading)
-
         if state != self.last_state:
             if (cx, cy) in self.goal_cells:
                 self.reached_goal = True
@@ -67,14 +60,13 @@ class WallFollower:
                 self.finished = True
                 return None
 
-        # --- ako smo upravo skrenuli: idi ravno AKO je naprijed slobodno ---
+        # ako smo upravo skrenuli: idi ravno AKO je naprijed slobodno
         if self.go_forward:
-            self.go_forward = False  # iskoristi zastavicu jednom
+            self.go_forward = False
             if self._passable(walls, cx, cy, heading):
                 return heading
-            # ako naprijed NIJE slobodno, padni u normalni izbor ispod
 
-        # --- pravilo LIJEVE ruke: lijevo -> naprijed -> desno -> natrag ---
+        # pravilo LIJEVE ruke: lijevo -> naprijed -> desno -> natrag
         for direction in (
             LEFT_OF[heading],
             heading,
@@ -82,7 +74,6 @@ class WallFollower:
             OPPOSITE[heading],
         ):
             if self._passable(walls, cx, cy, direction):
-                # ako je izbor SKRETANJE, forsiraj FORWARD u sljedecem koraku
                 if direction == LEFT_OF[heading] or direction == RIGHT_OF[heading]:
                     self.go_forward = True
                 return direction
