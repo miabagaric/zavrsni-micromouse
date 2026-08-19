@@ -84,17 +84,27 @@ def generate_launch_description():
         package="rviz2",
         executable="rviz2",
         output="screen",
+        parameters=[{"use_sim_time": use_sim_time}],
     )
 
-    # --- mapiranje + prikaz ---
+    # --- mapiranje + prikaz + planiranje ---
     mapping = Node(
-        package="micromouse_mapping", executable="mapping_node", output="screen"
+        package="micromouse_mapping",
+        executable="mapping_node",
+        output="screen",
+        parameters=[{"use_sim_time": use_sim_time}],
     )
     viz = Node(
-        package="micromouse_mapping", executable="maze_viz_node", output="screen"
+        package="micromouse_mapping",
+        executable="maze_viz_node",
+        output="screen",
+        parameters=[{"use_sim_time": use_sim_time}],
     )
     planner = Node(
-        package="micromouse_mapping", executable="planner_node", output="screen"
+        package="micromouse_mapping",
+        executable="planner_node",
+        output="screen",
+        parameters=[{"use_sim_time": use_sim_time}],
     )
 
     # --- staticki transform da 'map' postoji (makne crvenu gresku u RViz-u) ---

@@ -19,9 +19,13 @@ from micromouse_mapping.maze_map import (
     OPPOSITE,
 )
 from micromouse_mapping.flood_fill import FloodFill
+from micromouse_mapping.wall_follower import WallFollower
 
 
 CELL = 0.18
+
+# izbor algoritma istrazivanja: "flood" ili "wall"
+ALGO = "flood"
 
 
 def quat_to_heading(q):
@@ -37,8 +41,8 @@ def quat_to_heading(q):
 
 
 class PlannerNode(Node):
-    """ODLUCIVANJE: cita mapu + stanje + status. Kad robot miruje, flood fill
-    bira sljedeci smjer i salje JEDNU komandu. Ne racuna pozu, ne vozi."""
+    """ODLUCIVANJE: cita mapu + stanje + status. Kad robot miruje, odabrani
+    algoritam bira sljedeci smjer i salje JEDNU komandu. Ne racuna pozu, ne vozi."""
 
     def __init__(self):
         super().__init__("planner_node")
@@ -52,19 +56,23 @@ class PlannerNode(Node):
         self.status = "UNKNOWN"
 
         self.start_cell = (0, 0)
-        self.phase = "TO_CENTER"  # TO_CENTER -> TO_START -> DONE
-        self.flood = FloodFill(self.size)
+        self.phase = "TO_CENTER"  # samo za flood fill: TO_CENTER -> TO_START -> DONE
+        self.last_commanded_state = None  # (cx, cy, heading) kad smo zadnji put poslali
+
+        # --- odabir algoritma ---
+        self.algo_name = ALGO
+        if ALGO == "flood":
+            self.algo = FloodFill(self.size)
+        else:
+            self.algo = WallFollower(self.size)
+        self.get_logger().info(f"Algoritam istrazivanja: {self.algo_name}")
 
         self.mapped_cell = None
         self.create_subscription(String, "/mapped_cell", self.mapped_cb, 10)
-
         self.create_subscription(OccupancyGrid, "/maze_map", self.map_cb, 10)
         self.create_subscription(PoseStamped, "/robot_pose", self.pose_cb, 10)
         self.create_subscription(String, "/robot_status", self.status_cb, 10)
         self.cmd_pub = self.create_publisher(String, "/maze_commands", 10)
-
-        # pamti smo li vec poslali komandu za trenutni IDLE (da ne saljemo dvaput)
-        self.commanded_this_stop = False
 
         self.create_timer(0.1, self.decide)
 
@@ -81,13 +89,9 @@ class PlannerNode(Node):
         self.heading = quat_to_heading(msg.pose.orientation)
 
     def status_cb(self, msg):
-        # kad robot krene (izade iz IDLE), dopusti novu komandu za sljedeci stop
-        if msg.data != "IDLE":
-            self.commanded_this_stop = False
         self.status = msg.data
 
     def grid_to_walls(self, msg):
-        """Rekonstruira walls[x][y][4] iz OccupancyGrid encodinga (3x3 po celiji)."""
         w = msg.info.width
         data = msg.data
         sub, size = self.sub, self.size
@@ -118,63 +122,83 @@ class PlannerNode(Node):
         return walls
 
     def decide(self):
-        # planiraj samo kad: imamo mapu, robot miruje, i nismo vec poslali za ovaj stop
         if self.walls is None or self.status != "IDLE":
             return
-        if self.commanded_this_stop:
-            return
         if self.mapped_cell != (self.cx, self.cy):
+            return
+        current_state = (self.cx, self.cy, self.heading)
+        # ne salji novu komandu dok se stanje nije promijenilo od zadnje poslane
+        if current_state == self.last_commanded_state:
             return
 
         cx, cy = self.cx, self.cy
         if not (0 <= cx < self.size and 0 <= cy < self.size):
             return
 
-        # --- jesmo li na cilju? ---
-        if (cx, cy) in self.flood.goal_cells:
+        # dvije grane odlucivanja, ovisno o algoritmu
+        if self.algo_name == "flood":
+            best = self.decide_flood(cx, cy)
+        else:
+            best = self.decide_wall(cx, cy)
+
+        if best is None:
+            return  # algoritam je gotov (cilj, petlja, ili faza DONE) — vec logirano
+
+        # --- apsolutni smjer -> relativna komanda (ZAJEDNICKO za oba) ---
+        if best == self.heading:
+            cmd = "FORWARD"
+        elif best == LEFT_OF[self.heading]:
+            cmd = "TURN_LEFT"
+        else:
+            cmd = "TURN_RIGHT"
+
+        self.cmd_pub.publish(String(data=cmd))
+        self.last_commanded_state = current_state  # zapamti gdje smo poslali
+        self.get_logger().info(
+            f"[{self.algo_name}] ({cx},{cy}) {['N', 'E', 'S', 'W'][self.heading]} -> {cmd}"
+        )
+
+    def decide_flood(self, cx, cy):
+        """Flood fill grana: cilj-detekcija + faze + get_best_move."""
+        if (cx, cy) in self.algo.goal_cells:
             if self.phase == "TO_CENTER":
                 self.phase = "TO_START"
-                self.flood.set_goal([self.start_cell])
+                self.algo.set_goal([self.start_cell])
                 self.get_logger().info(
                     f"CILJ ({cx},{cy})! Povratak na {self.start_cell}."
                 )
             elif self.phase == "TO_START":
                 self.phase = "DONE"
                 self.get_logger().info(f"POVRATAK ZAVRSEN ({cx},{cy}). Stop.")
-            return
-
+            return None
         if self.phase == "DONE":
-            return
+            return None
 
-        # --- flood fill: najbolji sljedeci smjer ---
-        self.flood.update_distances(self.walls)
-        # DEBUG: što planner vidi za trenutnu ćeliju + susjede
-        wcell = self.walls[cx][cy]
-        self.get_logger().info(
-            f"DEBUG ({cx},{cy}) walls N={wcell[N]} E={wcell[E]} S={wcell[S]} W={wcell[W]} | "
-            f"dist ovdje={self.flood.distances[cx][cy]}"
-        )
-        best = self.flood.get_best_move(cx, cy, self.walls)
-        self.get_logger().info(f"DEBUG best={best}")
-
+        self.algo.update_distances(self.walls)
+        best = self.algo.get_best_move(cx, cy, self.walls)
         if best is None:
             self.get_logger().warn(f"nema poteza iz ({cx},{cy})")
-            return
+        return best
 
-        # --- apsolutni smjer -> relativna komanda ---
-        if best == self.heading:
-            cmd = "FORWARD"
-        elif best == LEFT_OF[self.heading]:
-            cmd = "TURN_LEFT"
-        else:
-            # RIGHT_OF ili OPPOSITE -> okreni desno (iduci ciklus nastavlja)
-            cmd = "TURN_RIGHT"
-
-        self.cmd_pub.publish(String(data=cmd))
-        self.commanded_this_stop = True
+    def decide_wall(self, cx, cy):
+        wcell = self.walls[cx][cy]
         self.get_logger().info(
-            f"({cx},{cy}) {['N', 'E', 'S', 'W'][self.heading]} -> {cmd}"
+            f"[wall] ({cx},{cy}) h={self.heading} walls N={wcell[N]} E={wcell[E]} S={wcell[S]} W={wcell[W]}"
         )
+        best = self.algo.get_best_move(cx, cy, self.heading, self.walls)
+        if (
+            best is None
+            and self.algo.finished
+            and not getattr(self, "_wall_reported", False)
+        ):
+            self._wall_reported = True
+            if self.algo.reached_goal:
+                self.get_logger().info(f"[wall] NASAO CENTAR, koraka={self.algo.steps}")
+            else:
+                self.get_logger().warn(
+                    f"[wall] ODUSTAO (petlja/limit), koraka={self.algo.steps}"
+                )
+        return best
 
 
 def main(args=None):
