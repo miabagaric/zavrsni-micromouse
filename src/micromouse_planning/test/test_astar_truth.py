@@ -5,8 +5,10 @@ import json
 from micromouse_common.maze_map import N, E, S, W, WALL, FREE
 from micromouse_planning.a_star import AStar
 from micromouse_planning.dijkstra import Dijkstra
+from micromouse_planning.diagonal_solver import DiagonalSolver, N as DN
+from micromouse_planning.a_star_diag import AStarDiag
 
-TRUTH = "/home/mia/micromouse_ws/src/micromouse_bringup/scripts/maze_truth.json"
+TRUTH = "/home/mia/micromouse_ws/src/micromouse_bringup/generated_mazes/truth_s3.json"
 
 
 def load_walls(path):
@@ -67,6 +69,44 @@ def main():
         alg.set_goal(goal)
         p, c, t, exp = alg.find_path(walls, start, N)
         print(f"{name:>9}: moves={len(p) - 1} turns={t} cost={c} prosireno={exp}")
+
+    print("\n--- Dijagonalni solver (Harrison model) ---")
+    ds = DiagonalSolver(size=size, start_heading=DN)
+    ds.set_goal(goal)
+    dp, dc, ndiag, dexp = ds.find_path(walls, start)
+    if dp is None:
+        print("nema puta")
+    else:
+        print(
+            f"dijagonalni put: celija={len(dp)} vrijeme={dc:.2f} "
+            f"dijag_stanja={ndiag} prosireno={dexp}"
+        )
+        # usporedba s ortogonalnim (isti A* od prije)
+        print(f"ortogonalni A*:  vrijeme(priblizno)={len(path) - 1 + 2.0 * turns:.2f}")
+        print(f"put: {dp}")
+
+    print("\n--- 8-smjerni A* (klasicni, s dijagonalama) ---")
+    ad = AStarDiag(size=size)
+    ad.set_goal(goal)
+    dp, dc, ndiag, dexp = ad.find_path(walls, start)
+    if dp is None:
+        print("nema puta")
+    else:
+        print(
+            f"8-smjerni: koraka={len(dp) - 1} dijagonala={ndiag} "
+            f"cost={dc:.2f} prosireno={dexp}"
+        )
+        print(f"ortogonalni A*: koraka={len(path) - 1} cost(duljina)={len(path) - 1}")
+        print(f"put: {dp}")
+
+        full, is_diag = ad.expand(dp, walls)
+        print(f"razvijeni put ({len(full)} celija): {full}")
+        # validacija: susjedne celije + prohodnost svakog mikro-koraka
+        ok = all(
+            abs(full[i][0] - full[i - 1][0]) + abs(full[i][1] - full[i - 1][1]) == 1
+            for i in range(1, len(full))
+        )
+        print("razvijeni put je susjedan i prohodan" if ok else "GRESKA u razvijanju")
 
 
 if __name__ == "__main__":
